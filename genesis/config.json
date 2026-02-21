@@ -1,0 +1,128 @@
+{
+  "graph": {
+    "entry": "memory_loader",
+    "exit": "execute",
+    "nodes": {
+      "memory_loader": {"fn_key": "memory_loader", "enabled": true, "params": {"topk_short": 5, "topk_mid": 3, "topk_long": 3, "topk_reflection": 3}},
+      "fundamental":   {"fn_key": "fundamental", "enabled": true, "params": {}},
+      "sentiment":     {"fn_key": "sentiment", "enabled": true, "params": {}},
+      "technical":     {"fn_key": "technical", "enabled": true, "params": {}},
+      "trader":        {"fn_key": "trader", "enabled": true, "params": {}},
+      "risk":          {"fn_key": "risk", "enabled": true, "params": {"risk_limits": {"max_position_frac": 0.3, "max_drawdown": 0.1}}},
+      "execute":       {"fn_key": "execute", "enabled": true, "params": {}},
+
+      "gradient":      {"fn_key": "gradient", "enabled": true, "params": {}},
+      "update":        {"fn_key": "update", "enabled": true, "params": {}}
+    },
+    "edges": [
+      ["memory_loader","fundamental"],
+      ["fundamental","sentiment"],
+      ["sentiment","technical"],
+      ["technical","trader"],
+      ["trader","risk"],
+
+      ["risk","__ROUTE_AFTER_RISK__"],
+
+      ["execute","__ROUTE_AFTER_EXECUTE__"],
+      ["gradient","update"],
+      ["update","__END__"]
+    ],
+    ""
+  },
+  "evolve": {
+    "enabled": true,
+    "cooldown_days": 3,
+    "trigger": {
+        "daily_loss_threshold": -0.02,
+        "rolling_days": 5,
+        "rolling_loss_threshold": -0.03,
+        "max_drawdown_threshold": 0.08,
+        "min_trades_before_evolve": 10
+      },
+    "selection": {
+      "candidate_k": 5,
+      "quick_backtest_days": 10
+    },
+    "mutation_boundaries": {
+      "weights_min": 0.05,
+      "weights_max": 0.5,
+      "temperature_max": 0.5,
+      "max_position_frac_cap": 0.5,
+      "lookback_window_range": [3,14]
+    }
+  },
+  "config": {
+    "topk_short": 7,
+    "topk_mid": 5,
+    "topk_long": 3,
+    "topk_reflection": 5,
+
+    "lookback_window_size": 5,
+
+    "risk_limits": {
+      "max_position_frac": 0.3,
+      "max_drawdown": 0.1
+    },
+
+    "retrieval_thresholds": {
+      "short_min_similarity": 0.75,
+      "mid_min_similarity": 0.60,
+      "long_min_similarity": 0.50,
+      "reflection_min_similarity": 0.80
+    }
+  },
+  "brain": {
+   "general": {
+    "agent_name": "company_agent",
+    "trading_symbol": "AAPL"
+  },
+  "agent": {
+    "agent_1": {
+      "embedding": {
+        "detail": {
+          "openai_api_key": null,
+          "embedding_model": "text-embedding-ada-002",
+          "chunk_size": 5000,
+          "verbose": false
+        }
+      }
+    }
+  },
+    "short": {
+            "jump_threshold_upper": 80,
+            "importance_score_initialization": "sample",
+            "decay_params": {"recency_factor": 5.0, "importance_factor": 0.97},
+            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9}
+        },
+        "mid": {
+            "jump_threshold_upper": 90,
+            "jump_threshold_lower": 20,
+            "importance_score_initialization": "sample",
+            "decay_params": {"recency_factor": 10.0, "importance_factor": 0.985},
+            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9}
+        },
+        "long": {
+            "jump_threshold_lower": 30,
+            "importance_score_initialization": "sample",
+            "decay_params": {"recency_factor": 30.0, "importance_factor": 0.995},
+            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9}
+        },
+        "reflection": {
+            "importance_score_initialization": "sample",
+            "decay_params": {"recency_factor": 15.0, "importance_factor": 0.99},
+            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9}
+        }
+  },
+  "weights": {
+    "fundamental": 0.35,
+    "sentiment": 0.25,
+    "technical": 0.25,
+    "reflection": 0.15
+  },
+  "llm": {
+    "temperature": 0.1,
+    "max_retries": 2,
+    "require_json_schema": true,
+    "min_confidence_to_trade": 0.6
+  }
+}
