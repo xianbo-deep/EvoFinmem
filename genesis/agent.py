@@ -4,7 +4,7 @@ import os
 from typing import TypedDict,Dict,Any,List
 from langgraph.graph import StateGraph,START,END
 import json
-
+import logging
 from memorydb import BrainDB, MemoryDB
 from portfolio import Portfolio
 
@@ -24,24 +24,6 @@ def ensure_date(d) -> date:
     return datetime.strptime(str(d), "%Y-%m-%d").date()
 
 
-@dataclass
-class NodeCfg:
-    name: str
-    fn_key: str
-    enabled: bool = True
-
-@dataclass
-class GraphCfg:
-    nodes: Dict[str, NodeCfg]
-    edges: List[tuple[str,str]]
-    start: str
-    end: str
-
-
-# 注册agent
-class AgentRegistry:
-    def __init__ (self):
-        self._fns: Dict[str,AgentFn] = {}
 
 # 状态容器
 class TradeState(TypedDict):
@@ -77,9 +59,7 @@ class TradeState(TypedDict):
     hit_memory_ids: List[int]
 
     # 分析师报告
-    fundamental_report: Dict[str, Any]
-    sentiment_report: Dict[str, Any]
-    technical_report: Dict[str, Any]
+    dynamic_results: Dict[str, Any]
 
     # 决策与执行
     trader_decision: Dict[str, Any] # 包括决策和原因
@@ -105,11 +85,12 @@ def memory_loader_node(state: TradeState) -> Dict[str,Any]:
     market = state["market_info"]
     query_text = f"{symbol} | {d.isoformat()} | market:{market}"
 
-    cfg = state.get("workflow_config", {})
-    k_short = cfg.get("topk_short", 5)
-    k_mid = cfg.get("topk_mid", 3)
-    k_long = cfg.get("topk_long", 3)
-    k_ref = cfg.get("topk_reflection", 3)
+    graph = state.get("workflow_config", {}).get("graph", {})
+    params = graph.get("nodes", {}).get("memory_loader", {}).get("params", {})
+    k_short = params.get("topk_short", 5)
+    k_mid = params.get("topk_mid", 3)
+    k_long = params.get("topk_long", 3)
+    k_ref = params.get("topk_reflection", 3)
 
     brain = state["_brain"]
     short, sid = brain.query_short(query_text, k_short, symbol)
@@ -126,75 +107,27 @@ def memory_loader_node(state: TradeState) -> Dict[str,Any]:
         # 为 EvoMAC 审计准备：记录“今天检索命中的所有 ids”
         "hit_memory_ids": list(set(sid + midid + lid + rid)),
     }
-
-# 基本面分析师
-def fundamental_analyst_node(state: TradeState) -> Dict[str,Any]:
-    d = state.get("cur_date_obj") or ensure_date(state["cur_date"])
-    _,_,filing_k,filing_q,_,_,_ = state["market_info"]
-    prompt = prompts.FUNDAMENTAL_ANALYST_PROMPT.format(
-        symbol=state["symbol"],
-        cur_date=state["cur_date"],
-        filings={"10K": filing_k, "10Q": filing_q},
-        mid_memory=state.get("mid_memory", []),
-        long_memory=state.get("long_memory", []),
-    )
-    rep = call_llm_json(state["_llm"],prompt)
-
-
-    # 写入记忆
-    brain = state["_brain"]
-    text = rep.get("report", json.dumps(rep, ensure_ascii=False))
-    brain.add_memory_mid(state["symbol"], d, text)
-    brain.add_memory_long(state["symbol"], d, text)
-
-    new_trace = state.get("trace", []) + [{"agent": "fundamental", "output": rep}]
-    return {"fundamental_report": rep, "trace": new_trace}
-
-
-
-# 情绪分析师
-def sentiment_analyst_node(state: TradeState) -> Dict[str,Any]:
-    d = state.get("cur_date_obj") or ensure_date(state["cur_date"])
-    _, _, _, _, news, _, _ = state["market_info"]
-    prompt = prompts.SENTIMENT_ANALYST_PROMPT.format(
-        symbol=state["symbol"],
-        cur_date=state["cur_date"],
-        news=news,
-        short_memory=state.get("short_memory", []),
-    )
-    rep = call_llm_json(state["_llm"], prompt)
-
-
-    # 写入记忆
-    brain = state["_brain"]
-    text = rep.get("report", json.dumps(rep, ensure_ascii=False))
-    brain.add_memory_short(state["symbol"], d, text)
-
-    new_trace = state.get("trace", []) + [{"agent": "sentiment", "output": rep}]
-    return {"sentiment_report": rep, "trace": new_trace}
-
-# 技术分析师
-def technical_analyst_node(state: TradeState) -> Dict[str,Any]:
-    prompt = prompts.TECHNICAL_ANALYST_PROMPT.format(
-        symbol=state['symbol'],
-        cur_date=state['cur_date'],
-        technical_and_momentum_data=state["market_info"]
-    )
-    rep = call_llm_json(state["_llm"], prompt)
-    new_trace = state.get("trace", []) + [{"agent": "technical", "output": rep}]
-    return {"technical_report": rep, "trace": new_trace}
-
 # 交易员
 def trader_node(state: TradeState) -> Dict[str,Any]:
-    prompt = prompts.TARDER_PROMPT.format(
+    # TODO 获取分析师报告
+    reports_dict = state.get("dynamic_results", {})
+    reports_str = ""
+    for analyst_name, report_content in reports_dict.items():
+        reports_str += f"\n【{analyst_name}分析师报告】:\n{json.dumps(report_content, ensure_ascii=False)}\n"
+    if not reports_str:
+        reports_str = "今日无任何分析师报告。"
+
+    # 填充模板
+    cfg = state.get("workflow_config", {}).get("graph", {}).get("nodes", {}).get("trader", {})
+    prompt_template = cfg.get("prompt", "你是交易员。请根据以下报告做出买卖决策：\n{reports}\n请给出 JSON。")
+    prompt = prompt_template.format(
         symbol=state["symbol"],
         cur_date=state["cur_date"],
         portfolio=state.get("portfolio_snapshot", {}),
-        fundamental_report=state.get("fundamental_report", {}),
-        sentiment_report=state.get("sentiment_report", {}),
-        technical_report=state.get("technical_report", {}),
-        reflection_memory=state.get("reflection_memory", []),
+        reports=reports_str,
+        reflection_memory=state.get("reflection_memory", [])
     )
+
     decision = call_llm_json(state["_llm"], prompt)
     reason_text = decision.get("reason", "")
     if reason_text and "_brain" in state:
@@ -335,3 +268,52 @@ def route_after_execute(state: TradeState) -> str:
     if state.get("pnl_feedback", 0.0) < 0:
         return "gradient"
     return END
+
+
+def create_dynamic_node(node_name: str):
+    def universal_node(state: TradeState) -> Dict[str, Any]:
+        node_cfg = state["workflow_config"]["graph"]["nodes"].get(node_name, {})
+
+        # 动态获取它需要吃什么数据
+        deps = node_cfg.get("data_dependencies", [])
+        format_kwargs = {}
+        for key in deps:
+            # 兼容性寻找：先去 state 第一层找，找不到再去 dynamic_results 里找
+            if key in state:
+                format_kwargs[key] = state[key]
+            elif key in state.get("dynamic_results", {}):
+                format_kwargs[key] = state["dynamic_results"][key]
+            else:
+                format_kwargs[key] = ""
+
+        # Prompt
+        prompt_dict = node_cfg.get("prompt", {})
+        try:
+            role = prompt_dict.get("role", "").format(**format_kwargs)
+            task = prompt_dict.get("task", "").format(**format_kwargs)
+            constraints_str = "\n".join([f"- {c}" for c in prompt_dict.get("constraints", [])])
+            final_prompt = f"# Role\n{role}\n\n# Task\n{task}\n\n# Constraints\n{constraints_str}"
+        except KeyError as e:
+            logging.error(f"节点 {node_name} 填空失败: {e}")
+            return {"dynamic_results": state.get("dynamic_results", {})}
+
+
+        rep = call_llm_json(state["_llm"], final_prompt)
+
+        #  记忆处理
+        write_tiers = node_cfg.get("memory_write_tiers", [])
+        if write_tiers and "_brain" in state and rep:
+            text_to_save = rep.get("output", json.dumps(rep, ensure_ascii=False))
+            d = state.get("cur_date_obj") or ensure_date(state["cur_date"])
+            for tier in write_tiers:
+                if tier == "short": state["_brain"].add_memory_short(state["symbol"], d, text_to_save)
+
+        # 把任何输出，存进动态字典
+        current_results = state.get("dynamic_results", {})
+        current_results[node_name] = rep
+
+        return {"dynamic_results": current_results, "trace": state.get("trace", []) + [{"agent": node_name}]}
+
+    universal_node.__name__ = f"{node_name}_node"
+    return universal_node
+

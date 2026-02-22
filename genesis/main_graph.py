@@ -85,93 +85,117 @@ def call_llm_json(llm,prompt:str) -> Dict[str,Any]:
 def build_graph(cfg: Dict[str,Any]) -> Any:
     g = StateGraph(TradeState)
 
-    # 节点
-    enabled = set(cfg.get("graph",{}).get("enabled_nodes", []))
-    parallel = bool(cfg.get("graph",{}).get("parallel_analysts", False))
-    ver = cfg.get("graph", {}).get("verifiers", {})
+    # 读取配置
+    graph_cfg = cfg.get("graph", {})
+    nodes_cfg = graph_cfg.get("nodes", {})
+    edges_cfg = graph_cfg.get("edges", [])
+    entry_node = graph_cfg.get("entry", "memory_loader")
 
-    # 加载记忆
-    g.add_node("memory_loader", memory_loader_node)
-    # 分析
-    g.add_node("fundamental",fundamental_analyst_node)
-    g.add_node("sentiment",sentiment_analyst_node)
-    g.add_node("technical", technical_analyst_node)
+    # 注册启用节点
+    active_nodes = set()
 
-    # 决策
-    g.add_node("trader",trader_node)
-    g.add_node("risk",risk_manager_node)
-    g.add_node("execute",execute_node)
+    EXECUTIVE_NODES = {
+        "memory_loader": memory_loader_node,
+        "trader": trader_node,
+        "risk": risk_manager_node,
+        "execute": execute_node,
+        "gradient": gradient_node,
+        "update": update_node
+    }
 
-    # 迭代
-    g.add_node("gradient",gradient_node)
-    g.add_node("update",update_node)
+    
 
+    for node_name, node_info in nodes_cfg.items():
+        if not node_info.get("enabled", False) and node_name in EXECUTIVE_NODES:
+            return False  # 动态剔除被禁用的节点
+        
+        if not node_info.get("enabled", False):
+            continue
+
+        else:
+            # 呼叫工厂，动态生成分析师节点
+            g.add_node(node_name, create_dynamic_node(node_name))
+
+        active_nodes.add(node_name)
     # 边
-    g.add_edge(START, "memory_loader")
-    g.add_edge("memory_loader", "fundamental")
-    g.add_edge("fundamental", "sentiment")
-    g.add_edge("sentiment", "technical")
-    g.add_edge("technical", "trader")
+    if entry_node in active_nodes:
+        g.add_edge(START, entry_node)
+    else:
+        logging.error(f"严重错误：指定的入口节点 {entry_node} 未启用或不存在！")
 
-    g.add_edge("trader","risk")
+    for source,target in edges_cfg:
+        if source not in active_nodes:
+            continue
+        if target == "__ROUTE_AFTER_RISK__":
+            g.add_conditional_edges(source, route_after_risk, {"execute": "execute", END: END})
 
-    # 路由边：是否撤回交易
-    g.add_conditional_edges("risk", route_after_risk, {"execute": "execute", END: END})
+        elif target == "__ROUTE_AFTER_EXECUTE__":
+            g.add_conditional_edges(source, route_after_execute, {"gradient": "gradient", END: END})
 
+        elif target == "__END__":
+            g.add_edge(source, END)
 
-    # 路由边：是否更新架构
-    g.add_conditional_edges("execute",route_after_execute,{"gradient": "gradient", END: END})
-
-    g.add_edge("gradient", "update")
-    g.add_edge("update", END)
+        else:
+            if target in active_nodes:
+                g.add_edge(source, target)
+            else:
+                logging.warning(f"警告：边配置中的目标节点 {target} 未启用或不存在，已跳过该边连接！")
 
     return g.compile()
 
-# 初始化大脑 后需要改的
-def build_brain(symbol: str) -> BrainDB:
-    cfg = {
-        "general": {
-            "agent_name": "company_agent",
-            "trading_symbol": symbol,
-        },
-        "agent": {
-            "agent_1": {
-                "embedding": {
-                    "detail": {
-                        # 这里要与你 embedding.py 需要的参数对齐
-                        # 你的 embedding.py 读 OPENAI_API_KEY，所以最少也要确保环境变量存在
-                        "model": "text-embedding-ada-002",
-                    }
-                }
-            }
-        },
-        "short": {
-            "jump_threshold_upper": 80,
-            "importance_score_initialization": "sample",  # 依据你的 importance_score.py 支持的 type
-            "decay_params": {"recency_factor": 5.0, "importance_factor": 0.97},
-            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9},
-        },
-        "mid": {
-            "jump_threshold_upper": 90,
-            "jump_threshold_lower": 20,
-            "importance_score_initialization": "sample",
-            "decay_params": {"recency_factor": 10.0, "importance_factor": 0.985},
-            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9},
-        },
-        "long": {
-            "jump_threshold_lower": 30,
-            "importance_score_initialization": "sample",
-            "decay_params": {"recency_factor": 30.0, "importance_factor": 0.995},
-            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9},
-        },
-        "reflection": {
-            "importance_score_initialization": "sample",
-            "decay_params": {"recency_factor": 15.0, "importance_factor": 0.99},
-            "clean_up_threshold_dict": {"recency_threshold": -1e9, "importance_threshold": -1e9},
-        },
-    }
-    return BrainDB.from_config(cfg)
+# TODO 初始化大脑 后需要改的
+def build_brain(cfg: Dict[str,Any],symbol: str) -> BrainDB:
+    config = cfg.get("brain", {})
+    return BrainDB.from_config(config)
 
+# 验证拓扑结构
+def validate_graph_topology(cfg: Dict[str,Any]) -> bool:
+    graph_cfg = cfg.get("graph", {})
+    nodes_cfg = graph_cfg.get("nodes", {})
+    edges_cfg = graph_cfg.get("edges", [])
+    entry = graph_cfg.get("entry", "memory_loader")
+
+    # 获取所有存活的节点
+    active_nodes = {name for name, info in nodes_cfg.items() if info.get("enabled", False)}
+
+    # 必要节点被删除
+    required_nodes = {"memory_loader", "trader", "risk", "execute", "gradient", "update"}
+    if not required_nodes.issubset(active_nodes):
+        logging.error("安全审查失败：大模型删除了致命的核心高管节点！")
+        return False
+
+    # 入口被删除
+    if entry not in active_nodes:
+        logging.error("安全审查失败：入口节点不存在或被禁用！")
+        return False
+
+    # 检查边的合法性
+    adjacency_list = {node: [] for node in active_nodes}
+    for source,target in edges_cfg:
+        if source in active_nodes:
+            target_clean = target if not target.startswith("__") else "MAGIC_ROUTE"
+            adjacency_list[source].append(target_clean)
+
+    # DFS
+    visited = set()
+    def dfs(current_node):
+        if current_node == "trader":
+            return True
+        if current_node == "MAGIC_ROUTE":
+            return False
+
+        visited.add(current_node)
+        for neighbor in adjacency_list.get(current_node, []):
+            if neighbor not in visited:
+                if dfs(neighbor):
+                    return True
+        return False
+
+    if not dfs(entry):
+        logging.error("安全审查失败：无法从入口节点访问到交易员节点，存在安全风险！")
+        return False
+
+    return True
 
 # 每日循环
 def run_one_epoch(brain: BrainDB,env: MarketEnvironment,symbol: str,workflow_config: Dict[str,Any]) -> Dict[str,Any]:
